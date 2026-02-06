@@ -1,0 +1,15 @@
+# Core dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+diffusers>=0.32.0
+transformers>=4.35.0
+accelerate>=0.25.0
+pillow>=10.0.0
+numpy>=1.24.0
+
+# Optional dependencies for metrics
+lpips>=0.1.4  # For LPIPS perceptual distance
+
+# Optional for video file mode (if needed in future)
+# imageio>=2.31.0
+# imageio-ffmpeg>=0.4.9
