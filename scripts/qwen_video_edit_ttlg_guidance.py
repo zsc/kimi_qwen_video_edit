@@ -418,21 +418,48 @@ def make_ttlg_callback(
         
         # Enable gradients for latents
         with torch.enable_grad():
-            # Create gradient-enabled copy
-            latents_g = latents.detach().float().requires_grad_(True)
+            # Create gradient-enabled copy (keep original dtype for VAE compatibility)
+            latents_g = latents.detach().requires_grad_(True)
             
             # Determine what to decode (prioritize pred_x0 if available)
             latent_to_decode = callback_kwargs.get("pred_original_sample", latents_g)
             if latent_to_decode is None:
                 latent_to_decode = latents_g
             
-            # Decode latents to image (differentiable)
-            # VAE scaling factor
-            scaling_factor = getattr(pipe.vae.config, "scaling_factor", 0.18215)
-            latents_vae = latent_to_decode / scaling_factor
+            # Qwen latents are "packed" during denoising: (B, num_patches, channels)
+            # where num_patches = (H/2) * (W/2), channels = 16*4 = 64
+            # We need to unpack to VAE format: (B, 16, 1, H, W)
+            if latent_to_decode.dim() == 3:
+                # Unpack latents: (B, num_patches, 64) -> (B, 16, 1, H, W)
+                B, num_patches, channels = latent_to_decode.shape
+                # num_patches = (H/2) * (W/2), so H = W = 2 * sqrt(num_patches)
+                h = w = int((num_patches ** 0.5) * 2)
+                
+                # Unpack: view as (B, H/2, W/2, 16, 2, 2) then permute and reshape
+                latents_vae = latent_to_decode.view(B, h // 2, w // 2, channels // 4, 2, 2)
+                latents_vae = latents_vae.permute(0, 3, 1, 4, 2, 5)  # (B, 16, H/2, 2, W/2, 2)
+                latents_vae = latents_vae.reshape(B, channels // 4, 1, h, w)  # (B, 16, 1, H, W)
+            else:
+                latents_vae = latent_to_decode
+            
+            # Apply VAE normalization (latents_mean and latents_std)
+            if hasattr(pipe.vae.config, 'latents_mean') and hasattr(pipe.vae.config, 'latents_std'):
+                latents_mean = (
+                    torch.tensor(pipe.vae.config.latents_mean, device=latents_vae.device, dtype=latents_vae.dtype)
+                    .view(1, -1, 1, 1, 1)
+                )
+                latents_std = (
+                    torch.tensor(pipe.vae.config.latents_std, device=latents_vae.device, dtype=latents_vae.dtype)
+                    .view(1, -1, 1, 1, 1)
+                )
+                latents_vae = latents_vae / latents_std + latents_mean
             
             # Decode
-            img_pred = pipe.vae.decode(latents_vae).sample
+            decoded = pipe.vae.decode(latents_vae, return_dict=False)[0]
+            
+            # Extract first frame: (B, C, T, H, W) -> (B, C, H, W)
+            img_pred = decoded[:, :, 0]
+            
             # img_pred is in [-1, 1], convert to [0, 1]
             img_pred = (img_pred / 2 + 0.5).clamp(0, 1)
             
@@ -503,8 +530,11 @@ def make_ttlg_callback(
             if total_loss > 0:
                 grad = torch.autograd.grad(total_loss, latents_g)[0]
                 
-                # Normalize gradient (per sample)
-                grad_norm = grad.norm(dim=(1, 2, 3), keepdim=True) + 1e-8
+                # Normalize gradient (per sample) - handle both 3D and 4D
+                if grad.dim() == 4:
+                    grad_norm = grad.norm(dim=(1, 2, 3), keepdim=True) + 1e-8
+                else:  # 3D (B, H*W, C)
+                    grad_norm = grad.norm(dim=(1, 2), keepdim=True) + 1e-8
                 grad = grad / grad_norm
                 
                 # Update latents

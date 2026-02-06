@@ -306,13 +306,15 @@ def generate_frame(
         inputs["callback_on_step_end"] = callback
     
     # Run generation (without inference_mode to allow gradients)
-    with torch.no_grad() if not config.is_enabled() else torch.enable_grad():
-        if config.is_enabled():
-            # Disable inference mode for TTLG
-            torch.set_inference_mode(False)
-        
+    # For TTLG, we need to avoid torch.inference_mode() context
+    if config.is_enabled():
+        # Just run without any special context manager
         output = pipe(**inputs)
         output_image = output.images[0]
+    else:
+        with torch.no_grad():
+            output = pipe(**inputs)
+            output_image = output.images[0]
     
     # Compute metrics if requested
     metrics = None
@@ -396,10 +398,13 @@ def main():
     pipe.set_progress_bar_config(disable=False)
     
     # Freeze all model parameters for TTLG
-    for param in pipe.unet.parameters():
-        param.requires_grad = False
-    for param in pipe.vae.parameters():
-        param.requires_grad = False
+    # Note: QwenImageEditPlusPipeline doesn't have unet; it uses transformer
+    if hasattr(pipe, "transformer"):
+        for param in pipe.transformer.parameters():
+            param.requires_grad = False
+    if hasattr(pipe, "vae"):
+        for param in pipe.vae.parameters():
+            param.requires_grad = False
     if hasattr(pipe, "text_encoder") and pipe.text_encoder is not None:
         for param in pipe.text_encoder.parameters():
             param.requires_grad = False
